@@ -31,19 +31,36 @@ ROOTFS_MARKER = ROOTFS_DIR / ".setup_done"
 
 
 # ── Find executable ──────────────────────────────────────────────────────────
+def _ensure_proot() -> bool:
+    """Lazy-init proot env if glibc is too old. Returns True if proot mode active."""
+    global _USE_PROOT
+    if _USE_PROOT is not None:
+        return _USE_PROOT
+    _USE_PROOT = _need_proot()
+    if _USE_PROOT:
+        print("[DreaminaCLI] Old glibc detected, setting up proot environment (one-time)...")
+        try:
+            _setup_proot_env()
+            print("[DreaminaCLI] Proot environment ready.")
+        except Exception as e:
+            print(f"[DreaminaCLI] Proot setup failed: {e}")
+            _USE_PROOT = False
+    return _USE_PROOT
+
+
 def _find_dreamina_exe() -> Optional[str]:
     env_path = os.environ.get("DREAMINA_EXE")
     if env_path and Path(env_path).exists():
         return str(Path(env_path))
 
     # If we are in proot mode, CLI lives inside rootfs
-    if _USE_PROOT:
-        proot_dreamina = ROOTFS_DIR / "root" / ".local" / "bin" / "dreamina"
-        if proot_dreamina.exists():
-            return str(proot_dreamina)
-        proot_dreamina2 = ROOTFS_DIR / "usr" / "local" / "bin" / "dreamina"
-        if proot_dreamina2.exists():
-            return str(proot_dreamina2)
+    # Return the path *as seen inside the rootfs* (not host absolute path)
+    if _ensure_proot():
+        if (ROOTFS_DIR / "root" / ".local" / "bin" / "dreamina").exists():
+            return "/root/.local/bin/dreamina"
+        if (ROOTFS_DIR / "usr" / "local" / "bin" / "dreamina").exists():
+            return "/usr/local/bin/dreamina"
+        return None
 
     # On Windows, npm creates a .CMD wrapper; prefer the real .exe.
     if os.name == "nt":
@@ -97,17 +114,30 @@ def _get_glibc_version() -> Optional[str]:
 
 def _need_proot() -> bool:
     """Check if current glibc is too old for dreamina CLI (needs >= 2.34)."""
+    # Method 1: parse glibc version
     glibc = _get_glibc_version()
-    if glibc is None:
-        return False
+    if glibc is not None:
+        try:
+            parts = glibc.split(".")
+            major = int(parts[0])
+            minor = int(parts[1])
+            if major < 2 or (major == 2 and minor < 34):
+                return True
+            return False
+        except (ValueError, IndexError):
+            pass
+
+    # Method 2: ldd not available, try running host dreamina directly
     try:
-        parts = glibc.split(".")
-        major = int(parts[0])
-        minor = int(parts[1])
-        if major < 2 or (major == 2 and minor < 34):
+        result = subprocess.run(
+            ["dreamina", "version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0 and "GLIBC" in (result.stderr or ""):
             return True
-    except (ValueError, IndexError):
+    except Exception:
         pass
+
     return False
 
 
@@ -205,19 +235,7 @@ _USE_PROOT = None  # lazy-evaluated cache
 
 
 def _run_cli(cmd: list, data_dir: Optional[Path] = None, timeout: int = 60) -> Tuple[int, str, str]:
-    global _USE_PROOT
-    if _USE_PROOT is None:
-        _USE_PROOT = _need_proot()
-        if _USE_PROOT:
-            print("[DreaminaCLI] Old glibc detected, setting up proot environment (one-time)...")
-            try:
-                _setup_proot_env()
-                print("[DreaminaCLI] Proot environment ready.")
-            except Exception as e:
-                print(f"[DreaminaCLI] Proot setup failed: {e}")
-                _USE_PROOT = False
-
-    if _USE_PROOT:
+    if _ensure_proot():
         try:
             result = _proot_run(cmd, data_dir, timeout)
             return result.returncode, result.stdout, result.stderr

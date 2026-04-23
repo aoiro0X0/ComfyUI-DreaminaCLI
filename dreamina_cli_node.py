@@ -23,12 +23,28 @@ DEFAULT_DATA_DIR = NODE_DIR / "data"
 DEFAULT_OUTPUT_DIR = Path(tempfile.gettempdir()) / "dreamina_cli_output"
 DEVICE_CODE_FILE = NODE_DIR / ".device_code.json"
 
+# Proot env (for old-glibc cloud systems)
+PROOT_DIR = NODE_DIR / "proot_env"
+PROOT_BIN = PROOT_DIR / "proot"
+ROOTFS_DIR = PROOT_DIR / "rootfs"
+ROOTFS_MARKER = ROOTFS_DIR / ".setup_done"
+
 
 # ── Find executable ──────────────────────────────────────────────────────────
 def _find_dreamina_exe() -> Optional[str]:
     env_path = os.environ.get("DREAMINA_EXE")
     if env_path and Path(env_path).exists():
         return str(Path(env_path))
+
+    # If we are in proot mode, CLI lives inside rootfs
+    if _USE_PROOT:
+        proot_dreamina = ROOTFS_DIR / "root" / ".local" / "bin" / "dreamina"
+        if proot_dreamina.exists():
+            return str(proot_dreamina)
+        proot_dreamina2 = ROOTFS_DIR / "usr" / "local" / "bin" / "dreamina"
+        if proot_dreamina2.exists():
+            return str(proot_dreamina2)
+
     # On Windows, npm creates a .CMD wrapper; prefer the real .exe.
     if os.name == "nt":
         candidates_win = [
@@ -65,6 +81,107 @@ def _find_dreamina_exe() -> Optional[str]:
     return None
 
 
+# ── Proot / glibc compat ───────────────────────────────────────────────────
+def _get_glibc_version() -> Optional[str]:
+    """Return glibc version like '2.31', or None."""
+    try:
+        result = subprocess.run(["ldd", "--version"], capture_output=True, text=True, timeout=10)
+        combined = result.stdout + result.stderr
+        m = re.search(r'(\d+\.\d+)', combined)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def _need_proot() -> bool:
+    """Check if current glibc is too old for dreamina CLI (needs >= 2.34)."""
+    glibc = _get_glibc_version()
+    if glibc is None:
+        return False
+    try:
+        parts = glibc.split(".")
+        major = int(parts[0])
+        minor = int(parts[1])
+        if major < 2 or (major == 2 and minor < 34):
+            return True
+    except (ValueError, IndexError):
+        pass
+    return False
+
+
+def _download_file(url: str, dest: Path, timeout: int = 300) -> Path:
+    """Download with simple progress."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[DreaminaCLI] Downloading {url.split('/')[-1]} ...")
+    urllib.request.urlretrieve(url, dest)
+    print(f"[DreaminaCLI] Saved to {dest}")
+    return dest
+
+
+def _setup_proot_env() -> bool:
+    """Download proot + Debian 12 rootfs, install dreamina CLI inside."""
+    PROOT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 1. proot static binary
+    if not PROOT_BIN.exists():
+        proot_url = "https://github.com/proot-me/proot/releases/download/v5.3.0/proot-v5.3.0-x86_64-static"
+        _download_file(proot_url, PROOT_BIN)
+        PROOT_BIN.chmod(0o755)
+
+    # 2. Debian 12 rootfs
+    if not ROOTFS_DIR.exists():
+        rootfs_tar = PROOT_DIR / "rootfs.tar.xz"
+        if not rootfs_tar.exists():
+            # Docker debian:bookworm-slim rootfs
+            rootfs_url = "https://github.com/debuerreotype/docker-debian-artifacts/raw/dist-amd64/bookworm/slim/rootfs.tar.xz"
+            _download_file(rootfs_url, rootfs_tar)
+        ROOTFS_DIR.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["tar", "-xJf", str(rootfs_tar), "-C", str(ROOTFS_DIR)], check=True, timeout=120)
+        rootfs_tar.unlink(missing_ok=True)
+
+    # 3. Setup DNS so apt/curl work
+    resolv = ROOTFS_DIR / "etc" / "resolv.conf"
+    resolv.parent.mkdir(parents=True, exist_ok=True)
+    resolv.write_text("nameserver 8.8.8.8\nnameserver 8.8.4.4\n")
+
+    # 4. Install dreamina CLI inside rootfs
+    if not ROOTFS_MARKER.exists():
+        # Update package list & install curl
+        _proot_run(["apt-get", "update"], timeout=120)
+        _proot_run(["apt-get", "install", "-y", "curl", "ca-certificates"], timeout=180)
+        # Install dreamina
+        _proot_run(["bash", "-c", "curl -fsSL https://jimeng.jianying.com/cli | bash"], timeout=180)
+        ROOTFS_MARKER.touch()
+
+    return True
+
+
+def _proot_run(cmd: list, data_dir: Optional[Path] = None, timeout: int = 60):
+    """Run command inside proot environment."""
+    proot_cmd = [str(PROOT_BIN), "-R", str(ROOTFS_DIR), "-w", "/root"]
+
+    # Bind-mount data dir (token storage)
+    if data_dir and data_dir.exists():
+        proot_cmd.extend(["-b", f"{data_dir}:/root/.dreamina_cli"])
+
+    # Bind-mount temp dir for image inputs / video outputs
+    host_tmp = Path(tempfile.gettempdir())
+    proot_cmd.extend(["-b", f"{host_tmp}:/tmp/dreamina_host"])
+
+    proot_cmd.extend(cmd)
+    return subprocess.run(
+        proot_cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
 # ── Env helpers ──────────────────────────────────────────────────────────────
 def _make_env(data_dir: Optional[Path] = None) -> Dict[str, str]:
     """Prepare env so the CLI reads/writes token under data_dir."""
@@ -84,7 +201,29 @@ def _data_dir_for(data_dir_str: str = "") -> Path:
 
 
 # ── Run CLI ──────────────────────────────────────────────────────────────────
+_USE_PROOT = None  # lazy-evaluated cache
+
+
 def _run_cli(cmd: list, data_dir: Optional[Path] = None, timeout: int = 60) -> Tuple[int, str, str]:
+    global _USE_PROOT
+    if _USE_PROOT is None:
+        _USE_PROOT = _need_proot()
+        if _USE_PROOT:
+            print("[DreaminaCLI] Old glibc detected, setting up proot environment (one-time)...")
+            try:
+                _setup_proot_env()
+                print("[DreaminaCLI] Proot environment ready.")
+            except Exception as e:
+                print(f"[DreaminaCLI] Proot setup failed: {e}")
+                _USE_PROOT = False
+
+    if _USE_PROOT:
+        try:
+            result = _proot_run(cmd, data_dir, timeout)
+            return result.returncode, result.stdout, result.stderr
+        except subprocess.TimeoutExpired as e:
+            return -1, e.stdout or "", e.stderr or ""
+
     env = _make_env(data_dir)
     try:
         result = subprocess.run(

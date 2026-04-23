@@ -113,6 +113,19 @@ DreaminaCLI_VideoGenerator.frames ──► VHS_VideoCombine.images
 - **No browser on the server?** No problem — the OAuth link opens on **your** local browser.
 - **Token persistence**: By default tokens are saved inside the custom node folder. Most cloud ComfyUI platforms persist `custom_nodes/` across restarts. If your platform wipes the directory, set `dreamina_data_dir` to a persistent path (e.g., ComfyUI's `input/` or `output/` folder).
 
+### Old glibc / Ubuntu 20.04 support (proot auto-adapt)
+
+Some cloud platforms run older Linux distributions (e.g., Ubuntu 20.04 with glibc 2.31) that cannot run the official Dreamina CLI binary (which requires glibc ≥ 2.34).
+
+This node automatically detects the situation and **downloads a lightweight proot + Debian 12 rootfs** on first run — no root privileges needed. The CLI then runs inside the isolated environment transparently.
+
+> **One-time setup**: first execution may take 3–5 minutes to download the rootfs (~25 MB) and install the CLI inside it. Subsequent runs are instant.
+
+If automatic proot setup fails, you can still:
+1. Complete `dreamina login` on your **local Windows/Mac** machine
+2. Zip the `~/.dreamina_cli` folder and upload it to the cloud node's `data/` directory
+3. The node will use the uploaded token
+
 ## Troubleshooting
 
 | Issue | Solution |

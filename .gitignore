@@ -1,0 +1,5 @@
+# Runtime artifacts
+.device_code.json
+data/
+__pycache__/
+*.pyc

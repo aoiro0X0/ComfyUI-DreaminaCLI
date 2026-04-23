@@ -1,0 +1,63 @@
+{
+  "last_node_id": 2,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "DreaminaCLI_Login",
+      "pos": [100, 150],
+      "size": [400, 200],
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "status",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 0
+        },
+        {
+          "name": "message",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 1
+        }
+      ],
+      "widgets_values": [
+        "login",
+        ""
+      ],
+      "mode": 0
+    },
+    {
+      "id": 2,
+      "type": "DreaminaCLI_Login",
+      "pos": [100, 450],
+      "size": [400, 200],
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "status",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 0
+        },
+        {
+          "name": "message",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 1
+        }
+      ],
+      "widgets_values": [
+        "check",
+        ""
+      ],
+      "mode": 0
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}
